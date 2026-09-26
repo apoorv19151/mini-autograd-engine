@@ -1,18 +1,29 @@
 import math
-from typing import List, Tuple, Optional, Union
+import sys
+from typing import Tuple, Union
+
+MAX_EXP = math.log(sys.float_info.max)
 
 class Value:
   """Value class stores a scalar value and its gradient."""
+  __slots__ = (
+    "data",
+    "grad",
+    "_prev",
+    "_operator",
+    "_backward",
+    "label",
+  )
 
-  def __init__(self, data : Union[int, float], _children : Tuple = (), _operator : str = '', label : str = ''):
+  def __init__(self, data: Union[int, float], _children: Tuple = (), _operator: str = '', label: str = ''):
     self.data = data
     self.grad = 0.0
-    self._prev = set(_children)
+    self._prev = tuple(_children)
     self._operator = _operator
-    self._backward = lambda : None
+    self._backward = lambda: None
     self.label = label
 
-  def __add__(self, other : Union['Value', int, float]) -> 'Value':
+  def __add__(self, other: Union['Value', int, float]) -> 'Value':
     other = other if isinstance(other, Value) else Value(other)
     out = Value(self.data + other.data, (self, other), '+')
 
@@ -23,7 +34,7 @@ class Value:
 
     return out
 
-  def __mul__(self, other : Union['Value', int, float]) -> 'Value':
+  def __mul__(self, other: Union['Value', int, float]) -> 'Value':
     other = other if isinstance(other, Value) else Value(other)
     out = Value(self.data * other.data, (self, other), '*')
 
@@ -35,7 +46,7 @@ class Value:
     return out
 
   def exp(self) -> 'Value':
-    clipped_data = max(min(self.data, 700), -700) # clipping the value to prevent overflow
+    clipped_data = max(min(self.data, MAX_EXP), -MAX_EXP) # clipping the value to prevent overflow
     out = Value(math.exp(clipped_data), (self,), 'exp')
 
     def _backward():
@@ -167,4 +178,3 @@ class Value:
     self.grad = 1.0
     for node in reversed(topo):
       node._backward()
-
