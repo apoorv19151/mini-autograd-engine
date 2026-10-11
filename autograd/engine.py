@@ -1,8 +1,5 @@
 import math
-import sys
 from typing import Tuple, Union
-
-MAX_EXP = math.log(sys.float_info.max)
 
 class Value:
   """Value class stores a scalar value and its gradient."""
@@ -16,7 +13,7 @@ class Value:
   )
 
   def __init__(self, data: Union[int, float], _children: Tuple = (), _operator: str = '', label: str = ''):
-    self.data = data
+    self.data = float(data)
     self.grad = 0.0
     self._prev = tuple(_children)
     self._operator = _operator
@@ -30,38 +27,46 @@ class Value:
     def _backward():
       self.grad += out.grad
       other.grad += out.grad
+    
     out._backward = _backward
-
     return out
 
   def __mul__(self, other: Union['Value', int, float]) -> 'Value':
     other = other if isinstance(other, Value) else Value(other)
-    out = Value(self.data * other.data, (self, other), '*')
+
+    left_data = self.data
+    right_data = other.data
+    out = Value(left_data * right_data, (self, other), '*')
 
     def _backward():
-      self.grad += out.grad * other.data
-      other.grad += out.grad * self.data
+      self.grad += out.grad * right_data
+      other.grad += out.grad * left_data
+    
     out._backward = _backward
-
     return out
 
   def exp(self) -> 'Value':
-    clipped_data = max(min(self.data, MAX_EXP), -MAX_EXP) # clipping the value to prevent overflow
-    out = Value(math.exp(clipped_data), (self,), 'exp')
+    try:
+      value = math.exp(self.data)
+    except OverflowError:
+      value = math.inf
+
+    out = Value(value, (self,), 'exp')
 
     def _backward():
-      self.grad += out.grad * out.data
-    out._backward = _backward
+      self.grad += out.grad * value
 
+    out._backward = _backward
     return out
 
   def relu(self) -> 'Value':
-    out = Value(0 if self.data < 0 else self.data, (self,), 'ReLU')
+    out = Value(max(0.0, self.data), (self,), 'ReLU')
+    value = self.data
 
     def _backward():
-      self.grad += (0 if self.data < 0 else 1) * out.grad
+      self.grad += (1 if value > 0  else 0.0) * out.grad
+    
     out._backward = _backward
-
     return out
 
   def sigmoid(self) -> 'Value':
@@ -77,104 +82,129 @@ class Value:
 
     def _backward():
       self.grad += (sig * (1 - sig)) * out.grad
+    
     out._backward = _backward
-
     return out
 
   def tanh(self) -> 'Value':
-    # Adding numerical stability for tanh
-    if self.data > 20:
-      t = 1.0
-    elif self.data < -20:
-      t = -1.0
-    else:
-      exp_2x = math.exp(2 * self.data)
-      t = (exp_2x - 1) / (exp_2x + 1)
-
-    out = Value(t, (self,), 'tanh')
+    value = math.tanh(self.data)
+    out = Value(value, (self,), 'tanh')
 
     def _backward():
-      self.grad += (1 - t**2) * out.grad
-    out._backward = _backward
+      self.grad += (1 - value**2) * out.grad
 
+    out._backward = _backward
     return out
 
   def log(self) -> 'Value':
-    # Natural logarithm with numerical stability
-    safe_data = max(self.data, 1e-15)
-    out = Value(math.log(safe_data), (self,), 'log')
+    if self.data <= 0:
+      raise ValueError(
+        f"log is defined only for positive real values; got {self.data}"
+      )
+
+    value = self.data
+    out = Value(math.log(value), (self,), 'log')
 
     def _backward():
-      self.grad += out.grad / safe_data
-    out._backward = _backward
+      self.grad += out.grad / value
 
+    out._backward = _backward
     return out
 
-  def __pow__(self, other : Union[int, float]) -> 'Value':
-    assert isinstance(other, (int, float))
-    out = Value(self.data**other, (self,), f'**{other}')
+  def __pow__(self, exponent: Union[int, float]) -> 'Value':
+    if isinstance(exponent, bool) or not isinstance(exponent, (int, float)):
+      raise TypeError("exponent must be an int or float")
+
+    base = self.data
+
+    if base == 0 and exponent < 0:
+      raise ValueError("zero cannot be raised to a negative power")
+
+    if base < 0 and not float(exponent).is_integer():
+      raise ValueError(
+        "fractional powers of negative values are not supported"
+      )
+
+    out = Value(base**exponent, (self,), f"**{exponent}")
 
     def _backward():
-      self.grad += out.grad * other * self.data**(other - 1)
+      if exponent == 0:
+        local_gradient = 0.0
+      elif base == 0 and exponent == 1:
+        local_gradient = 1.0
+      elif base == 0 and exponent > 1:
+        local_gradient = 0.0
+      elif base == 0 and 0 < exponent < 1:
+        local_gradient = math.inf
+      else:
+        local_gradient = exponent * (base ** (exponent - 1))
+
+      self.grad += out.grad * local_gradient
+
     out._backward = _backward
-
     return out
-
-  def __radd__(self, other):
+  
+  def __radd__(self, other: Union['Value', int, float]) -> 'Value':
     return self + other
 
-  def __rmul__(self, other):
+  def __rmul__(self, other: Union['Value', int, float]) -> 'Value':
     return self * other
 
-  def __neg__(self):
+  def __neg__(self) -> 'Value':
     return self * -1
 
-  def __sub__(self, other):
+  def __sub__(self, other: Union['Value', int, float]) -> 'Value':
     other = other if isinstance(other, Value) else Value(other)
     return self + (-other)
 
-  def __rsub__(self, other):
+  def __rsub__(self, other: Union['Value', int, float]) -> 'Value':
     return -self + other
 
-  def __truediv__(self, other):
+  def __truediv__(self, other: Union['Value', int, float]) -> 'Value':
     other = other if isinstance(other, Value) else Value(other)
     return self * other**-1
 
-  def __rtruediv__(self, other):
+  def __rtruediv__(self, other: Union['Value', int, float]) -> 'Value':
     return other * self**-1
 
-  def __repr__(self):
-    return f'Value(data={self.data}, prev={self._prev}, label={self.label})'
+  def __repr__(self) -> str:
+    return (
+      f"Value(data={self.data}, grad={self.grad}, op={self._operator!r}, label={self.label!r})"
+    )
 
-  def backward(self):
-    # Iterative topological sort to avoid recursion depth issues
+  def backward(self, gradient: float = 1.0) -> None:
+    """Backpropagate and accumulate gradients on leaf values."""
     visited = set()
     topo = []
-
-    # Use a stack for iterative DFS
-    stack = [self]
+    stack = [(self, False)]
 
     while stack:
-      node = stack[-1]
+      node, expanded = stack.pop()
 
       if node in visited:
-        stack.pop()
         continue
 
-      # Check if all children have been processed
-      all_children_processed = True
-      for child in node._prev:
-        if child not in visited:
-          stack.append(child)
-          all_children_processed = False
-
-      # If all children are processed, we can add this node to topo order
-      if all_children_processed:
+      if expanded:
         visited.add(node)
         topo.append(node)
-        stack.pop()
+        continue
 
-    # Run backward pass in reverse topological order
-    self.grad = 1.0
+      stack.append((node, True))
+
+      for parent in reversed(node._prev):
+        if parent not in visited:
+          stack.append((parent, False))
+
+    if not self._prev:
+      self.grad += float(gradient)
+      return
+
+    for node in topo:
+      if node._prev:
+        node.grad = 0.0
+
+    self.grad = float(gradient)
+
     for node in reversed(topo):
       node._backward()
+
