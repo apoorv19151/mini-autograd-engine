@@ -1,51 +1,86 @@
-import sys
-import os
 import logging
 import math
 import random
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Union
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import Value from autograd
 from autograd.engine import Value
 
-# Configure logging
-logging.basicConfig(level = logging.INFO)
+# Module logger
 logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
   """Config class for hyperparameters."""
-  learning_rate : float = 0.001
-  batch_size : int = 32
-  epochs : int = 10
-  hidden_sizes : List[int] = None
-  activation : str = 'relu'
-  optimizer : str = 'adam'
-  weight_init : str = 'he'
-  log_interval : int = 100
+  learning_rate: float = 0.001
+  batch_size: int = 32
+  epochs: int = 10
+  hidden_sizes: List[int] = field(default_factory=lambda: [128, 64])
+  activation: str = 'relu'
+  optimizer: str = 'adam'
+  weight_init: str = 'he'
+  log_interval: int = 100
 
   def __post_init__(self):
-    if self.hidden_sizes is None:
-      self.hidden_sizes = [128, 64]
+    if (
+      not math.isfinite(self.learning_rate)
+      or self.learning_rate <= 0
+    ):
+      raise ValueError("learning_rate must be positive and finite")
+
+    for name in ("batch_size", "log_interval"):
+      value = getattr(self, name)
+
+      if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+    if type(self.epochs) is not int or self.epochs < 0:
+      raise ValueError("Epochs must be a non-negative integer")
+
+    if not isinstance(self.hidden_sizes, list):
+      raise ValueError("hidden_sizes must be a list of positive integers")
+
+    if any(type(size) is not int or size <= 0 for size in self.hidden_sizes):
+      raise ValueError("hidden_sizes must contain positive integers")
+
+    if self.activation not in {"relu", "tanh", "sigmoid", "linear"}:
+      raise ValueError(f"Unknown activation: {self.activation}")
+
+    if self.optimizer not in {"sgd", "adam"}:
+      raise ValueError(f"Unknown optimizer: {self.optimizer}")
+
+    if self.weight_init not in {"he", "he_normal", "xavier", "normal"}:
+      raise ValueError(f"Unknown weight initialization: {self.weight_init}")
 
   @classmethod
-  def from_json(cls, json_path : str) -> 'Config':
-    """Load the configuration from JSON file."""
-    with open(json_path, 'r') as f:
+  def from_json(cls, json_path: str) -> 'Config':
+    """Load configuration from a JSON object."""
+    with open(json_path, 'r', encoding='utf-8') as f:
       config_dict = json.load(f)
+
+    if not isinstance(config_dict, dict):
+      raise ValueError("Configuration JSON must contain an object")
+
     return cls(**config_dict)
 
 # Utility functions
-def one_hot(y : int, num_classes : int) -> List[Value]:
-  """Create one-hot encoded vector."""
-  return [Value(1.0) if i == y else Value(0.0) for i in range(num_classes)]
+def one_hot(y: int, num_classes: int) -> List[Value]:
+  """Encode a class index as a one-hot vector of Value objects."""
+  if type(num_classes) is not int or num_classes <= 0:
+    raise ValueError("num_classes must be a positive integer")
 
-def clip_gradient(parameters : List[Value], max_norm : float = 1.0):
+  if type(y) is not int:
+    raise ValueError("y must be an integer class index")
+
+  if not 0 <= y < num_classes:
+    raise ValueError(f"Class index {y} must be between 0 and {num_classes - 1}")
+
+  return [Value(1.0 if i==y else 0.0) for i in range(num_classes)]
+
+def clip_gradient(parameters: List[Value], max_norm: float = 1.0):
   """Clip gradients to prevent exploding gradients."""
   total_norm = math.sqrt(sum(p.grad**2 for p in parameters))
   if total_norm > max_norm:
@@ -53,34 +88,43 @@ def clip_gradient(parameters : List[Value], max_norm : float = 1.0):
     for p in parameters:
       p.grad *= clip_coef
 
-def predictions_from_outputs(outputs : List[List[Value]]) -> List[int]:
+def predictions_from_outputs(outputs: List[List[Value]]) -> List[int]:
   """Convert the model outputs to predicted class indices."""
   predictions = []
+
   for output in outputs:
-    pred_class = max(range(len(output)), key = lambda i : output[i].data) # returns the index i with the highest score
-    predictions.append(pred_class)
+    best_class_index = 0
+    best_class_value = output[0].data
+
+    for i in range(1, len(output)):
+      if output[i].data > best_class_value:
+        best_class_value = output[i].data
+        best_class_index = i
+
+    predictions.append(best_class_index)
+
   return predictions
 
 # Weight Initialization
 class WeightInitializer:
 
   @staticmethod
-  def xavier_uniform(nin : int, nout : int) -> float:
+  def xavier_uniform(nin: int, nout: int) -> float:
     limit = math.sqrt(6.0 / (nin + nout))
     return random.uniform(-limit, limit)
 
   @staticmethod
-  def he_uniform(nin : int) -> float:
+  def he_uniform(nin: int) -> float:
     limit = math.sqrt(6.0 / nin)
     return random.uniform(-limit, limit)
 
   @staticmethod
-  def he_normal(nin : int) -> float:
+  def he_normal(nin: int) -> float:
     std = math.sqrt(2.0 / nin)
     return random.gauss(0, std)
 
   @staticmethod
-  def normal(mean : float = 0.0, std : float = 0.01) -> float:
+  def normal(mean: float = 0.0, std: float = 0.01) -> float:
     return random.gauss(mean, std)
 
 # Neural Network Component
@@ -88,7 +132,7 @@ class Module(ABC):
   """Base class for all neural network modules."""
 
   @abstractmethod
-  def __call__(self, x : List[Value]) -> Union[Value, List[Value]]:
+  def __call__(self, x: List[Value]) -> Union[Value, List[Value]]:
     pass
 
   @abstractmethod
@@ -101,14 +145,14 @@ class Module(ABC):
       p.grad = 0.0
 
 class Neuron:
-  def __init__(self, nin : int, activation : str = 'relu', init_method : str = 'he'):
+  def __init__(self, nin: int, activation: str = 'relu', init_method: str = 'he', nout: int = 1):
     self.nin = nin
     self.activation = activation
 
     if init_method == 'he':
       self.w = [Value(WeightInitializer.he_uniform(nin)) for _ in range(nin)]
     elif init_method == 'xavier':
-      self.w = [Value(WeightInitializer.xavier_uniform(nin)) for _ in range(nin)]
+      self.w = [Value(WeightInitializer.xavier_uniform(nin, nout)) for _ in range(nin)]
     elif init_method == 'he_normal':
       self.w = [Value(WeightInitializer.he_normal(nin)) for _ in range(nin)]
     else:
@@ -116,7 +160,7 @@ class Neuron:
 
     self.b = Value(0.0)
 
-  def __call__(self, x : List[Value]) -> Value:
+  def __call__(self, x: List[Value]) -> Value:
     assert len(x) == self.nin, f"Expected {self.nin} inputs, got {len(x)}"
 
     # Linear transformation
@@ -138,12 +182,12 @@ class Neuron:
     return self.w + [self.b]
 
 class Layer(Module):
-  def __init__(self, nin : int, nout : int, activation : str = 'relu', init_method : str = 'he'):
+  def __init__(self, nin: int, nout: int, activation: str = 'relu', init_method: str = 'he'):
     self.nin = nin
     self.nout = nout
-    self.neurons = [Neuron(nin, activation, init_method) for _ in range(nout)]
+    self.neurons = [Neuron(nin, activation, init_method, nout) for _ in range(nout)]
 
-  def __call__(self, x : List[Value]) -> List[Value]:
+  def __call__(self, x: List[Value]) -> List[Value]:
     outputs = [neuron(x) for neuron in self.neurons]
     return outputs
 
@@ -151,7 +195,7 @@ class Layer(Module):
     return [p for neuron in self.neurons for p in neuron.parameters()]
 
 class MLP(Module):
-  def __init__(self, nin : int, architecture : List[int], activations : Optional[List[str]] = None, init_method : str = 'he'):
+  def __init__(self, nin: int, architecture: List[int], activations: Optional[List[str]] = None, init_method: str = 'he'):
     self.nin = nin
     self.architecture = architecture
 
@@ -170,7 +214,7 @@ class MLP(Module):
 
     logger.info(f"Created MLP with architecture: {nin} -> {' -> '.join(map(str, architecture))}")
 
-  def __call__(self, x : List[Value]) -> List[Value]:
+  def __call__(self, x: List[Value]) -> List[Value]:
     for layer in self.layers:
       x = layer(x)
     return x
@@ -183,13 +227,13 @@ class Loss(ABC):
   """Base class for loss functions."""
 
   @abstractmethod
-  def __call__(self, y_pred : List[Value], y_true : List[Value]) -> Value:
+  def __call__(self, y_pred: List[Value], y_true: List[Value]) -> Value:
     pass
 
 class MSELoss(Loss):
   """Mean Squared Error loss."""
 
-  def __call__(self, y_pred : List[Value], y_true : List[Value]) -> Value:
+  def __call__(self, y_pred: List[Value], y_true: List[Value]) -> Value:
     assert len(y_pred) == len(y_true), "Prediction and target size mismatch"
 
     return sum((yp - yt)**2 for yp, yt in zip(y_pred, y_true))/len(y_pred)
@@ -197,7 +241,7 @@ class MSELoss(Loss):
 class CrossEntropyLoss(Loss):
   """Cross-entropy loss with numerical stability."""
 
-  def __call__(self, y_pred : List[Value], y_true : List[Value]) -> Value:
+  def __call__(self, y_pred: List[Value], y_true: List[Value]) -> Value:
     assert len(y_pred) == len(y_true), "Prediction and target size mismatch"
 
     # Using Log-softmax for numerical stability
@@ -217,7 +261,7 @@ class CrossEntropyLoss(Loss):
 class BinaryCrossEntropyLoss(Loss):
   """Binary Cross-entropy loss with numerical stability."""
 
-  def __call__(self, y_pred : List[Value], y_true : List[Value]) -> Value:
+  def __call__(self, y_pred: List[Value], y_true: List[Value]) -> Value:
     assert len(y_pred) == len(y_true), "Prediction and target size mismatch"
 
     loss = Value(0.0)
@@ -233,7 +277,7 @@ class BinaryCrossEntropyLoss(Loss):
 class Optimizer(ABC):
   """Base class for optimizers."""
 
-  def __init__(self, parameters : List[Value]):
+  def __init__(self, parameters: List[Value]):
     self.parameters = parameters
 
   def zero_grad(self):
@@ -247,7 +291,7 @@ class Optimizer(ABC):
 class SGD(Optimizer):
   """Stochastic Gradient Descent with momentum."""
 
-  def __init__(self, parameters : List[Value], lr : float = 0.01, momentum : float = 0.0, weight_decay : float = 0.0):
+  def __init__(self, parameters: List[Value], lr: float = 0.01, momentum: float = 0.0, weight_decay: float = 0.0):
     super().__init__(parameters)
     self.lr = lr
     self.momentum = momentum
@@ -266,7 +310,7 @@ class SGD(Optimizer):
 class Adam(Optimizer):
   """Adam optimizer with bias correction."""
 
-  def __init__(self, parameters : List[Value], lr : float = 0.001, beta1 : float = 0.9, beta2 : float = 0.999, eps : float = 1e-8, weight_decay : float = 0.0):
+  def __init__(self, parameters: List[Value], lr: float = 0.001, beta1: float = 0.9, beta2: float = 0.999, eps: float = 1e-8, weight_decay: float = 0.0):
     super().__init__(parameters)
     self.lr = lr
     self.beta1 = beta1
@@ -303,24 +347,24 @@ class Adam(Optimizer):
 class LRScheduler(ABC):
   """Base class for learning rate scheduler."""
 
-  def __init__(self, optimizer : Optimizer):
+  def __init__(self, optimizer: Optimizer):
     self.optimizer = optimizer
     self.base_lr = optimizer.lr
 
   @abstractmethod
-  def step(self, epoch : int):
+  def step(self, epoch: int):
     pass
 
 class StepLR(LRScheduler):
   """Step learning rate scheduler."""
 
-  def __init__(self, optimizer : Optimizer, step_size : int, gamma : float = 0.1):
+  def __init__(self, optimizer: Optimizer, step_size: int, gamma: float = 0.1):
     super().__init__(optimizer)
     self.step_size = step_size
     self.gamma = gamma
 
-  def step(self, epoch : int):
-    if epoch > 0 and epoch % self.step_size == 0:
+  def step(self, epoch: int):
+    if (epoch + 1) % self.step_size == 0:
       self.optimizer.lr *= self.gamma
       logger.info(f"Learning rate reduced to {self.optimizer.lr}")
 
@@ -329,14 +373,14 @@ class Metrics:
   """Collection of evaluation metrics."""
 
   @staticmethod
-  def accuracy(y_pred : List[int], y_true : List[int]) -> float:
+  def accuracy(y_pred: List[int], y_true: List[int]) -> float:
     assert len(y_pred) == len(y_true), "Prediction and target size mismatch"
 
     correct = sum(1 for pred, true in zip(y_pred, y_true) if pred == true)
     return correct / len(y_pred)
 
   @staticmethod
-  def precision_recall_f1(y_pred : List[int], y_true : List[int], num_classes : int) -> Dict[str, float]:
+  def precision_recall_f1(y_pred: List[int], y_true: List[int], num_classes: int) -> Dict[str, float]:
     assert len(y_pred) == len(y_true), "Prediction and target size mismatch"
 
     confusion = [[0 for _ in range(num_classes)] for _ in range(num_classes)]
@@ -347,6 +391,7 @@ class Metrics:
 
     precision = []
     recall = []
+    f1_scores = []
 
     for i in range(num_classes):
       tp = confusion[i][i]
@@ -358,31 +403,37 @@ class Metrics:
 
       precision.append(prec)
       recall.append(rec)
+      f1_scores.append(2*tp / (2*tp + fp + fn) if (2*tp + fp + fn) else 0.0)
 
     average_precision = sum(precision) / len(precision)
     average_recall = sum(recall) / len(recall)
+    average_f1 = sum(f1_scores) / num_classes
 
-    average_f1 = (2 * average_precision * average_recall) / (average_precision + average_recall) if (average_precision + average_recall) > 0 else 0
-
-    return {'precision' : average_precision, 'recall' : average_recall, 'f1' : average_f1}
+    return {'precision': average_precision, 'recall': average_recall, 'f1': average_f1}
 
 # Training utilities
 class Trainer:
   """Memory-efficient training class."""
 
-  def __init__(self, model : MLP, optimizer : Optimizer, loss_fn : Loss, config : Config, scheduler : Optional[LRScheduler] = None):
+  def __init__(self, model: MLP, optimizer: Optimizer, loss_fn: Loss, config: Config, scheduler: Optional[LRScheduler] = None):
     self.model = model
     self.optimizer = optimizer
     self.loss_fn = loss_fn
     self.config = config
     self.scheduler = scheduler
-    self.history = {'train_loss' : [], 'train_acc' : [], 'val_loss' : [], 'val_acc' : []}
+    self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
 
-  def train_epoch(self, X_train : List[List[float]], y_train : List[int]) -> Tuple[float, float]:
+  def train_epoch(self, X_train: List[List[float]], y_train: List[int]) -> Tuple[float, float]:
     """Train for one epoch with memory-efficient processing."""
     total_loss = 0.0
     all_predictions = []
     n_samples = len(X_train)
+
+    # Shuffle features and labels in the same order
+    indices = list(range(n_samples))
+    random.shuffle(indices)
+    X_train = [X_train[i] for i in indices]
+    y_train = [y_train[i] for i in indices]
 
     # Process samples individually to avoid huge computational graphs
     for i in range(0, n_samples, self.config.batch_size):
@@ -428,14 +479,14 @@ class Trainer:
 
       # For logging, using average loss
       avg_batch_loss = batch_loss / batch_size
-      total_loss += avg_batch_loss
+      total_loss += batch_loss
       all_predictions.extend(batch_predictions)
 
       # Logging
       if (i // self.config.batch_size) % self.config.log_interval == 0:
         logger.info(f"Batch {i//self.config.batch_size + 1}/{(n_samples-1)//self.config.batch_size + 1}, Loss: {avg_batch_loss:.4f}")
 
-    avg_loss = total_loss / ((n_samples - 1) // self.config.batch_size + 1)
+    avg_loss = total_loss / n_samples
 
     # Calculate accuracy
     actual_labels = y_train[:len(all_predictions)]
@@ -443,7 +494,7 @@ class Trainer:
 
     return avg_loss, accuracy
 
-  def evaluate(self, X_test : List[List[float]], y_test : List[int]) -> Dict[str, float]:
+  def evaluate(self, X_test: List[List[float]], y_test: List[int]) -> Dict[str, float]:
     """Evaluate the model on test set."""
     predictions = []
     total_loss = 0.0
@@ -466,7 +517,7 @@ class Trainer:
 
     # Calculate metrics
     accuracy = Metrics.accuracy(predictions, y_test)
-    num_classes = len(set(y_test))
+    num_classes = self.model.architecture[-1]
     detailed_metrics = Metrics.precision_recall_f1(predictions, y_test, num_classes)
 
     return {
@@ -477,7 +528,7 @@ class Trainer:
       'f1': detailed_metrics['f1']
     }
 
-  def train(self, X_train : List[List[float]], y_train : List[int], X_val : Optional[List[List[float]]] = None, y_val : Optional[List[int]] = None) -> Dict[str, List[float]]:
+  def train(self, X_train: List[List[float]], y_train: List[int], X_val: Optional[List[List[float]]] = None, y_val: Optional[List[int]] = None) -> Dict[str, List[float]]:
     """Memory-efficient training loop."""
 
     logger.info("Starting training.")
